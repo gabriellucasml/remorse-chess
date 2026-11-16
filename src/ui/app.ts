@@ -1,4 +1,5 @@
 import type { Agent } from '../agents/agent';
+import { createSearchAgent, type Level } from '../agents/search';
 import {
   createGame,
   guiltBlockedSquares,
@@ -8,6 +9,8 @@ import {
   pieceById,
   play,
   resign,
+  fileOf,
+  rankOf,
   squareName,
   squareOf,
   type Color,
@@ -19,10 +22,19 @@ import {
 } from '../engine';
 import { pieceMarkup } from './pieces';
 
+export type MatchMode = 'pvp' | Level;
+
 export interface AppOptions {
-  /** `null` keeps that color with the person at the board. */
-  agents?: Partial<Record<Color, Agent | null>>;
+  /** Quem joga. Fora de `pvp`, a máquina fica com as pretas. */
+  mode?: MatchMode;
 }
+
+const MODES: { id: MatchMode; label: string }[] = [
+  { id: 'pvp', label: 'Pessoas' },
+  { id: 'easy', label: 'Fácil' },
+  { id: 'medium', label: 'Médio' },
+  { id: 'hard', label: 'Difícil' },
+];
 
 const NOUN: Record<PieceType, string> = {
   k: 'rei',
@@ -41,10 +53,8 @@ interface Pending {
 }
 
 export function startApp(root: HTMLElement, options: AppOptions = {}): void {
-  const agents: Record<Color, Agent | null> = {
-    w: options.agents?.w ?? null,
-    b: options.agents?.b ?? null,
-  };
+  const agents: Record<Color, Agent | null> = { w: null, b: null };
+  let mode: MatchMode = options.mode ?? 'medium';
 
   let game = createGame();
   const past: GameState[] = [];
@@ -54,6 +64,11 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
   let hint = '';
   let busy = false;
   let request = 0;
+  let spinning = false;
+  let moving = false;
+  let flipTurns = 0;
+  let flipTimer = 0;
+  let afterSpin: (() => void) | null = null;
 
   root.innerHTML = `
     <main class="page">
@@ -64,8 +79,10 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
       </header>
       <div class="layout">
         <section class="stage">
-          <div class="frame">
-            <div class="board" id="board"></div>
+          <div class="frame" id="frame">
+            <div class="board-rig" id="board-rig">
+              <div class="board" id="board"></div>
+            </div>
           </div>
           <ul class="legend">
             <li><i class="swatch guilt"></i>Culpa — não captura</li>
@@ -76,6 +93,18 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
           <p class="hint" id="hint"></p>
         </section>
         <aside class="side">
+          <fieldset class="match">
+            <legend>Mesa</legend>
+            <div class="modes" id="modes">
+              ${MODES.map((item) => `
+                <label>
+                  <input type="radio" name="mode" value="${item.id}" ${item.id === mode ? 'checked' : ''} />
+                  ${item.label}
+                </label>
+              `).join('')}
+            </div>
+            <p class="meta" id="seat"></p>
+          </fieldset>
           <section class="turn" id="turn"></section>
           <section class="panel" id="absolution" hidden></section>
           <section class="roster" id="roster"></section>
@@ -85,7 +114,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
           </section>
           <section class="actions">
             <button class="act" id="undo" type="button">Desfazer</button>
-            <button class="act" id="flip" type="button">Girar</button>
+            <button class="act" id="flip" type="button"><svg class="flip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.2-5.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Girar</button>
             <button class="act" id="resign" type="button">Desistir</button>
             <button class="act primary" id="reset" type="button">Nova partida</button>
           </section>
@@ -104,6 +133,8 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
     </main>
   `;
 
+  const frameEl = must(root, '#frame');
+  const boardRig = must(root, '#board-rig');
   const boardEl = must(root, '#board');
   const turnEl = must(root, '#turn');
   const absolutionEl = must(root, '#absolution');
@@ -115,14 +146,32 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
   const flipBtn = mustButton(root, '#flip');
   const resignBtn = mustButton(root, '#resign');
   const resetBtn = mustButton(root, '#reset');
+  const modesEl = must(root, '#modes');
+  const seatEl = must(root, '#seat');
+
+  seat();
+  modesEl.addEventListener('change', (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !isMode(input.value)) return;
+    if (spinning || moving) {
+      syncModeInputs();
+      return;
+    }
+    if (input.value === mode) return;
+    mode = input.value;
+    request += 1;
+    busy = false;
+    seat();
+    hint = '';
+    clearSelection();
+    render();
+    void agentTurn();
+  });
 
   undoBtn.addEventListener('click', undo);
-  flipBtn.addEventListener('click', () => {
-    orientation = opposite(orientation);
-    render();
-  });
+  flipBtn.addEventListener('click', flipBoard);
   resignBtn.addEventListener('click', () => {
-    if (busy || game.result.kind !== 'playing') return;
+    if (spinning || moving || busy || game.result.kind !== 'playing') return;
     if (agents[game.turn]) return;
     past.push(game);
     game = resign(game, game.turn);
@@ -130,6 +179,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
     render();
   });
   resetBtn.addEventListener('click', () => {
+    if (spinning || moving) return;
     request += 1;
     busy = false;
     game = createGame();
@@ -142,7 +192,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
+    if (event.key !== 'Escape' || spinning || moving) return;
     hint = '';
     clearSelection();
     render();
@@ -165,8 +215,8 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
       ? `${last.san}. ${prose(last.events, game)}`
       : 'As brancas começam. Nenhuma peça está culpada.';
     hintEl.textContent = hint;
-    undoBtn.disabled = past.length === 0 || busy;
-    resignBtn.disabled = ended || busy || Boolean(agents[game.turn]);
+    seatEl.textContent = mode === 'pvp' ? 'Os dois lados são pessoas.' : 'Você joga de brancas.';
+    syncActions();
   }
 
   function drawBoard(moves: readonly Move[], human: boolean): void {
@@ -220,7 +270,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   function onSquare(sq: number): void {
-    if (busy || game.result.kind !== 'playing' || agents[game.turn]) return;
+    if (moving || spinning || busy || game.result.kind !== 'playing' || agents[game.turn]) return;
     const piece = game.board[sq];
     const moves = selected === null ? [] : legalMoves(game).filter((move) => move.from === selected && move.to === sq);
     if (moves.length > 0) {
@@ -260,7 +310,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
     const check = game.result.kind === 'playing' && inCheck(game);
     turnEl.innerHTML = `
       <div>
-        <p class="meta">${agents[game.turn] ? `Agente · ${escapeHtml(agents[game.turn]!.name)}` : 'Pessoa'}</p>
+        <p class="meta">${agents[game.turn] ? `Agente · ${escapeHtml(agents[game.turn]!.name)}` : mode === 'pvp' ? 'Pessoa' : 'Você'}</p>
         <p class="who">${side(game.turn)}</p>
         ${ended ? `<p class="result">${escapeHtml(ended)}</p>` : check ? '<p class="result">Xeque.</p>' : ''}
       </div>
@@ -354,6 +404,7 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   function commit(move: Move): void {
+    const before = game;
     let ok = false;
     try {
       const played = play(game, move);
@@ -366,18 +417,114 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
       request += 1;
     }
     clearSelection();
-    render();
-    if (ok) void agentTurn();
+    void showMove(before, game).then(() => {
+      if (ok) void agentTurn();
+    });
   }
 
   function undo(): void {
-    if (busy || past.length === 0) return;
+    if (spinning || moving || past.length === 0) return;
     request += 1;
-    game = past.pop() ?? game;
+    busy = false;
+    const before = game;
+    // Against the machine, step back to the last human turn. One ply would
+    // land on the agent, and agentTurn would play the reply again.
+    do {
+      game = past.pop() ?? game;
+    } while (past.length > 0 && agents[game.turn]);
     hint = '';
     clearSelection();
+    void showMove(before, game);
+  }
+
+  function showMove(before: GameState, after: GameState): Promise<void> {
+    const plan = travelPlan(before, after);
+    const animate = plan.travelers.length + plan.ghosts.length > 0 && !reduceMotion();
+    if (animate) moving = true;
     render();
-    void agentTurn();
+    if (!animate) return Promise.resolve();
+    boardEl.classList.add('is-moving');
+    const motion = runTravel(plan).finally(() => {
+      moving = false;
+      boardEl.classList.remove('is-moving');
+      boardEl.querySelectorAll('.is-held').forEach((node) => node.classList.remove('is-held'));
+      boardEl.querySelectorAll('.traveler, .ghost').forEach((node) => node.remove());
+      syncActions();
+    });
+    return motion;
+  }
+
+  function runTravel(plan: TravelPlan): Promise<void> {
+    const placed: { el: HTMLElement; points: Point[]; fade: 'out' | 'in' | null }[] = [];
+    for (const trip of plan.travelers) {
+      const points = route(trip.from, trip.to)
+        .map((sq) => squarePoint(sq))
+        .filter((point): point is Point => point !== null);
+      if (points.length < 2) continue;
+      holdSquare(trip.to);
+      const el = overlay('traveler', trip.markup, points[0]);
+      placed.push({ el, points, fade: null });
+    }
+    for (const ghost of plan.ghosts) {
+      const point = squarePoint(ghost.square);
+      if (!point) continue;
+      const el = overlay('ghost', ghost.markup, point);
+      placed.push({ el, points: [point], fade: ghost.appear ? 'in' : 'out' });
+    }
+    if (placed.length === 0) return Promise.resolve();
+    const longest = Math.max(...placed.map((item) => travelDuration(Math.max(1, item.points.length - 1))));
+    const motions = placed.map((item) => {
+      const duration = item.fade ? longest : travelDuration(item.points.length - 1);
+      const frames = item.fade ? fadeFrames(item.points[0], item.fade) : glideFrames(item.points);
+      const animation = item.el.animate(frames, {
+        duration,
+        easing: item.fade ? 'linear' : 'cubic-bezier(0.33, 0, 0.2, 1)',
+        fill: 'forwards',
+      });
+      return motionDone(animation, duration);
+    });
+    return Promise.all(motions).then(() => undefined);
+  }
+
+  function motionDone(animation: Animation, duration: number): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const timer = window.setTimeout(finish, duration + 150);
+      animation.finished.then(finish, finish);
+    });
+  }
+
+  function holdSquare(sq: number): void {
+    const el = squareEl(sq);
+    el?.querySelectorAll('.piece, .mark').forEach((node) => node.classList.add('is-held'));
+  }
+
+  function overlay(kind: 'traveler' | 'ghost', markup: string, point: Point): HTMLElement {
+    const el = document.createElement('div');
+    el.className = kind;
+    el.style.width = `${point.size}px`;
+    el.style.height = `${point.size}px`;
+    el.style.transform = `translate(${point.x}px, ${point.y}px)`;
+    el.innerHTML = markup;
+    boardEl.append(el);
+    return el;
+  }
+
+  function squarePoint(sq: number): Point | null {
+    const el = squareEl(sq);
+    if (!el) return null;
+    return { x: el.offsetLeft, y: el.offsetTop, size: el.offsetWidth };
+  }
+
+  function squareEl(sq: number): HTMLElement | null {
+    const el = boardEl.querySelector(`[data-square="${squareName(sq)}"]`);
+    return el instanceof HTMLElement ? el : null;
   }
 
   function agentTurn(): void {
@@ -387,18 +534,24 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
     const snapshot = game;
     busy = true;
     render();
-    Promise.resolve()
+    frame()
       .then(() => agent.chooseMove(snapshot, legalMoves(snapshot)))
       .then((move) => {
         if (token !== request || game !== snapshot) return;
-        busy = false;
-        commit(move);
+        whenStill(() => {
+          if (token !== request || game !== snapshot) return;
+          busy = false;
+          commit(move);
+        });
       })
       .catch((error: unknown) => {
         if (token !== request) return;
-        busy = false;
-        hint = error instanceof Error ? error.message : 'O agente falhou.';
-        render();
+        whenStill(() => {
+          if (token !== request) return;
+          busy = false;
+          hint = error instanceof Error ? error.message : 'O agente falhou.';
+          render();
+        });
       });
   }
 
@@ -406,6 +559,203 @@ export function startApp(root: HTMLElement, options: AppOptions = {}): void {
     selected = null;
     pending = null;
   }
+
+  function flipBoard(): void {
+    if (spinning || moving) return;
+    orientation = opposite(orientation);
+    flipTurns += 1;
+    flipBtn.style.setProperty('--turns', String(flipTurns));
+    render();
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    spinning = true;
+    frameEl.classList.add('is-turning');
+    boardRig.classList.add('is-lifting');
+    boardEl.classList.add('is-flipping');
+    boardEl.addEventListener('animationend', onFlipEnd);
+    window.clearTimeout(flipTimer);
+    flipTimer = window.setTimeout(finishFlip, 1600);
+    syncActions();
+  }
+
+  function onFlipEnd(event: AnimationEvent): void {
+    if (event.target !== boardEl || event.animationName !== 'board-spin') return;
+    finishFlip();
+  }
+
+  function finishFlip(): void {
+    if (!spinning) return;
+    spinning = false;
+    window.clearTimeout(flipTimer);
+    boardEl.removeEventListener('animationend', onFlipEnd);
+    frameEl.classList.remove('is-turning');
+    boardRig.classList.remove('is-lifting');
+    boardEl.classList.remove('is-flipping');
+    syncActions();
+    const job = afterSpin;
+    afterSpin = null;
+    job?.();
+  }
+
+  function whenStill(job: () => void): void {
+    if (!spinning) {
+      job();
+      return;
+    }
+    afterSpin = job;
+  }
+
+  function syncActions(): void {
+    const ended = game.result.kind !== 'playing';
+    undoBtn.disabled = past.length === 0 || spinning || moving;
+    resignBtn.disabled = ended || busy || Boolean(agents[game.turn]) || spinning || moving;
+    resetBtn.disabled = spinning || moving;
+    flipBtn.disabled = spinning || moving;
+    syncModeInputs();
+  }
+
+  function seat(): void {
+    agents.w = null;
+    agents.b = mode === 'pvp' ? null : createSearchAgent(mode);
+  }
+
+  function syncModeInputs(): void {
+    modesEl.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((input) => {
+      input.checked = input.value === mode;
+      input.disabled = spinning || moving;
+    });
+  }
+}
+
+function frame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+function isMode(value: string): value is MatchMode {
+  return value === 'pvp' || value === 'easy' || value === 'medium' || value === 'hard';
+}
+
+interface Point {
+  x: number;
+  y: number;
+  size: number;
+}
+
+interface Trip {
+  from: number;
+  to: number;
+  markup: string;
+}
+
+interface Ghost {
+  square: number;
+  markup: string;
+  appear: boolean;
+}
+
+interface TravelPlan {
+  travelers: Trip[];
+  ghosts: Ghost[];
+}
+
+function travelPlan(before: GameState, after: GameState): TravelPlan {
+  const left = locate(before);
+  const arrived = locate(after);
+  const travelers: Trip[] = [];
+  const ghosts: Ghost[] = [];
+  for (const [id, piece] of left) {
+    const next = arrived.get(id);
+    if (!next) {
+      ghosts.push({ square: piece.sq, markup: pieceMarkup(piece.type, piece.color), appear: false });
+      continue;
+    }
+    if (next.sq !== piece.sq) {
+      travelers.push({
+        from: piece.sq,
+        to: next.sq,
+        markup: pieceMarkup(piece.type, piece.color),
+      });
+    }
+  }
+  for (const [id, piece] of arrived) {
+    if (left.has(id)) continue;
+    ghosts.push({ square: piece.sq, markup: pieceMarkup(piece.type, piece.color), appear: true });
+  }
+  return { travelers, ghosts };
+}
+
+function locate(state: GameState): Map<number, { sq: number; type: PieceType; color: Color }> {
+  const found = new Map<number, { sq: number; type: PieceType; color: Color }>();
+  for (let sq = 0; sq < 64; sq += 1) {
+    const piece = state.board[sq];
+    if (!piece) continue;
+    found.set(piece.id, { sq, type: piece.type, color: piece.color });
+  }
+  return found;
+}
+
+/** Squares a piece crosses, including both ends. Knights take the long leg of the L first. */
+function route(from: number, to: number): number[] {
+  const df = fileOf(to) - fileOf(from);
+  const dr = rankOf(to) - rankOf(from);
+  const adf = Math.abs(df);
+  const adr = Math.abs(dr);
+  if (adf === 0 && adr === 0) return [from];
+  if ((adf === 1 && adr === 2) || (adf === 2 && adr === 1)) {
+    const mid = adf > adr
+      ? squareAt(fileOf(from) + Math.sign(df) * 2, rankOf(from))
+      : squareAt(fileOf(from), rankOf(from) + Math.sign(dr) * 2);
+    return [from, mid, to];
+  }
+  if (adf === 0 || adr === 0 || adf === adr) {
+    const stepFile = df === 0 ? 0 : Math.sign(df);
+    const stepRank = dr === 0 ? 0 : Math.sign(dr);
+    const path = [from];
+    let file = fileOf(from);
+    let rank = rankOf(from);
+    while (file !== fileOf(to) || rank !== rankOf(to)) {
+      file += stepFile;
+      rank += stepRank;
+      path.push(squareAt(file, rank));
+    }
+    return path;
+  }
+  return [from, to];
+}
+
+function squareAt(file: number, rank: number): number {
+  return rank * 8 + file;
+}
+
+function travelDuration(hops: number): number {
+  return Math.min(820, 220 + Math.max(0, hops - 1) * 120);
+}
+
+function glideFrames(points: Point[]): Keyframe[] {
+  const last = Math.max(1, points.length - 1);
+  return points.map((point, index) => {
+    const t = index / last;
+    const lift = Math.sin(t * Math.PI);
+    return {
+      transform: `translate(${point.x}px, ${point.y}px) scale(${1 + lift * 0.08})`,
+      offset: t,
+    };
+  });
+}
+
+function fadeFrames(point: Point, fade: 'out' | 'in'): Keyframe[] {
+  const at = (opacity: number, scale: number, offset: number): Keyframe => ({
+    transform: `translate(${point.x}px, ${point.y}px) scale(${scale})`,
+    opacity,
+    offset,
+  });
+  if (fade === 'in') return [at(0, 0.72, 0), at(0, 0.86, 0.45), at(1, 1, 1)];
+  return [at(1, 1, 0), at(1, 1, 0.62), at(0, 0.72, 1)];
+}
+
+function reduceMotion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 function penancePhase(piece: GameState['board'][number], ply: number): 'now' | 'next' | null {

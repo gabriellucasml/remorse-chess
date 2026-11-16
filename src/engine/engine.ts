@@ -42,6 +42,14 @@ export function opposite(color: Color): Color {
 }
 
 export function cloneState(state: GameState): GameState {
+  const copy = clonePosition(state);
+  copy.history = state.history.map((entry) => ({ ...entry, events: entry.events.slice() }));
+  copy.repetition = state.repetition.slice();
+  return copy;
+}
+
+/** Board, rights and counters. History and repetition stay shared until a caller replaces them. */
+function clonePosition(state: GameState): GameState {
   return {
     board: state.board.map((piece) => (piece ? { ...piece } : null)),
     turn: state.turn,
@@ -50,8 +58,8 @@ export function cloneState(state: GameState): GameState {
     castling: { ...state.castling },
     ep: state.ep,
     lastMove: state.lastMove ? { ...state.lastMove } : null,
-    history: state.history.map((entry) => ({ ...entry, events: entry.events.slice() })),
-    repetition: state.repetition.slice(),
+    history: state.history,
+    repetition: state.repetition,
     result: state.result,
     nextId: state.nextId,
   };
@@ -478,7 +486,7 @@ function updateCastlingOnMove(state: GameState, piece: Piece, from: number, to: 
 }
 
 function applyUnchecked(state: GameState, move: Move): { next: GameState; events: GameEvent[] } {
-  const next = cloneState(state);
+  const next = clonePosition(state);
   const mover = next.board[move.from];
   if (!mover || mover.color !== next.turn) {
     throw new Error('Lance sem peça da vez.');
@@ -820,6 +828,17 @@ function suffix(result: GameResult, check: boolean): string {
   if (result.kind === 'checkmate') return '#';
   if (check) return '+';
   return '';
+}
+
+/**
+ * Apply a move the caller already knows is legal.
+ * Skips notation and the second legality scan so a search can walk the tree.
+ */
+export function applyLegal(state: GameState, move: Move): GameState {
+  const { next } = applyUnchecked(state, move);
+  next.repetition = [...state.repetition, positionKey(next)];
+  conclude(next);
+  return next;
 }
 
 export function play(state: GameState, move: Move): PlayResult {

@@ -48,5 +48,5 @@ const BODIES: Record<PieceType, string> = {
 };
 
 export function pieceMarkup(type: PieceType, color: Color): string {
-  return svg(color, BODIES[type]);
+  return `<span class="piece">${svg(color, BODIES[type])}</span>`;
 }

@@ -1,4 +1,5 @@
 export {
+  applyLegal,
   cloneState,
   createGame,
   findMove,
