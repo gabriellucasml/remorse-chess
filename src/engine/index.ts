@@ -1,0 +1,32 @@
+export {
+  cloneState,
+  createGame,
+  findMove,
+  guiltBlockedSquares,
+  inCheck,
+  legalMoves,
+  loadPosition,
+  opposite,
+  pieceById,
+  play,
+  playUci,
+  positionKey,
+  resign,
+  squareAttacked,
+  squareOf,
+} from './engine';
+export { fileOf, parseSquare, rankOf, squareName } from './squares';
+export type {
+  CastlingRights,
+  Color,
+  GameEvent,
+  GameResult,
+  GameState,
+  LogEntry,
+  Move,
+  Piece,
+  PieceType,
+  Placement,
+  PlayResult,
+  PositionInput,
+} from './types';
