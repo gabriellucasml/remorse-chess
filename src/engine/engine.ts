@@ -575,6 +575,149 @@ function applyUnchecked(state: GameState, move: Move): { next: GameState; events
   return { next, events };
 }
 
+function forwardPath(from: number, color: Color): number[] {
+  const file = fileOf(from);
+  const rank = rankOf(from);
+  const dir = color === 'w' ? 1 : -1;
+  const last = color === 'w' ? 7 : 0;
+  const squares: number[] = [];
+  for (let next = rank + dir; dir > 0 ? next <= last : next >= last; next += dir) {
+    squares.push(makeSquare(file, next));
+  }
+  return squares;
+}
+
+function squareOccupied(
+  board: GameState['board'],
+  sq: number,
+  path: ReadonlySet<number>,
+  stuck: ReadonlySet<number>,
+  vacated: ReadonlySet<number>,
+): boolean {
+  if (vacated.has(sq)) return false;
+  if (path.has(sq)) return stuck.has(sq);
+  return board[sq] !== null;
+}
+
+/** A blocker can leave the pawn's file without a capture it is no longer allowed to make. */
+function canLeavePath(
+  board: GameState['board'],
+  from: number,
+  path: ReadonlySet<number>,
+  stuck: ReadonlySet<number>,
+  vacated: ReadonlySet<number>,
+): boolean {
+  const piece = board[from];
+  if (!piece) return true;
+  const file = fileOf(from);
+  const rank = rankOf(from);
+  const opens = (sq: number, capture: boolean): boolean => {
+    if (path.has(sq)) return false;
+    const occupied = squareOccupied(board, sq, path, stuck, vacated);
+    if (!capture) return !occupied;
+    if (piece.guilt || !occupied) return false;
+    const target = board[sq];
+    return target !== null && target.color !== piece.color;
+  };
+
+  if (piece.type === 'p') {
+    const dir = piece.color === 'w' ? 1 : -1;
+    const forwardRank = rank + dir;
+    if (!onBoard(file, forwardRank)) return false;
+    const forward = makeSquare(file, forwardRank);
+    if (!squareOccupied(board, forward, path, stuck, vacated) && !path.has(forward)) return true;
+    const start = piece.color === 'w' ? 1 : 6;
+    if (rank === start && !squareOccupied(board, forward, path, stuck, vacated)) {
+      const beyond = makeSquare(file, rank + dir * 2);
+      if (!squareOccupied(board, beyond, path, stuck, vacated) && !path.has(beyond)) return true;
+    }
+    for (const df of [-1, 1]) {
+      const side = file + df;
+      if (!onBoard(side, forwardRank)) continue;
+      if (opens(makeSquare(side, forwardRank), true)) return true;
+    }
+    return false;
+  }
+
+  const steps = piece.type === 'n' ? KNIGHT_DELTAS : piece.type === 'k' ? KING_DELTAS : null;
+  if (steps) {
+    for (const [df, dr] of steps) {
+      const nextFile = file + df;
+      const nextRank = rank + dr;
+      if (!onBoard(nextFile, nextRank)) continue;
+      const sq = makeSquare(nextFile, nextRank);
+      if (opens(sq, false) || opens(sq, true)) return true;
+    }
+    return false;
+  }
+
+  const rays = piece.type === 'b'
+    ? BISHOP_DELTAS
+    : piece.type === 'r'
+      ? ROOK_DELTAS
+      : [...BISHOP_DELTAS, ...ROOK_DELTAS];
+  for (const [df, dr] of rays) {
+    let nextFile = file + df;
+    let nextRank = rank + dr;
+    while (onBoard(nextFile, nextRank)) {
+      const sq = makeSquare(nextFile, nextRank);
+      if (!squareOccupied(board, sq, path, stuck, vacated)) {
+        if (!path.has(sq)) return true;
+      } else {
+        if (opens(sq, true)) return true;
+        break;
+      }
+      nextFile += df;
+      nextRank += dr;
+    }
+  }
+  return false;
+}
+
+/** A guilty pawn still promotes if it can walk the file, once anything in front steps off it. */
+function guiltyPawnCanPromote(state: GameState, from: number): boolean {
+  const pawn = state.board[from];
+  if (!pawn || pawn.type !== 'p') return false;
+  const pathList = forwardPath(from, pawn.color);
+  const path = new Set(pathList);
+  const stuck = new Set(pathList.filter((sq) => state.board[sq]));
+  const vacated = new Set<number>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let sq = 0; sq < 64; sq += 1) {
+      if (sq === from || vacated.has(sq) || !state.board[sq]) continue;
+      if (!canLeavePath(state.board, sq, path, stuck, vacated)) continue;
+      vacated.add(sq);
+      stuck.delete(sq);
+      changed = true;
+      break;
+    }
+  }
+  return stuck.size === 0;
+}
+
+/**
+ * Mate needs a piece that attacks. A bishop can lay guilt down by resting, and
+ * a pawn that reaches the last rank becomes one. Without either, guilty pieces
+ * never attack again.
+ */
+function sideCanStillMate(state: GameState, color: Color): boolean {
+  const pawns: number[] = [];
+  for (let sq = 0; sq < 64; sq += 1) {
+    const piece = state.board[sq];
+    if (!piece || piece.color !== color) continue;
+    if (piece.type === 'b') return true;
+    if (piece.type !== 'k' && !piece.guilt) return true;
+    if (piece.type === 'p') pawns.push(sq);
+  }
+  return pawns.some((sq) => guiltyPawnCanPromote(state, sq));
+}
+
+function deadByPermanentGuilt(state: GameState): boolean {
+  return !sideCanStillMate(state, 'w') && !sideCanStillMate(state, 'b');
+}
+
 function squareColor(sq: number): number {
   return (fileOf(sq) + rankOf(sq)) & 1;
 }
@@ -596,7 +739,7 @@ function insufficientMaterial(state: GameState): boolean {
 }
 
 function conclude(state: GameState): void {
-  if (insufficientMaterial(state)) {
+  if (deadByPermanentGuilt(state) || insufficientMaterial(state)) {
     state.result = { kind: 'draw', reason: 'insufficient' };
     return;
   }

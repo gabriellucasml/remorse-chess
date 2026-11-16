@@ -435,7 +435,7 @@ function resultText(result: GameResult): string | null {
     case 'draw':
       if (result.reason === 'fifty-move') return 'Cinquenta lances sem captura nem peão. Empate.';
       if (result.reason === 'repetition') return 'A mesma posição três vezes. Empate.';
-      return 'Material insuficiente para o mate. Empate.';
+      return 'Não há mate possível. Empate.';
     default:
       return null;
   }

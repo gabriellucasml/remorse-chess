@@ -49,13 +49,21 @@ O peão não vira dama. Na última fileira ele vira **bispo**.
 
 Se os dois bispos caírem, promover é o único caminho de volta à absolvição. O peão promovido não absolve no lance em que chega; a partir do seguinte, já é bispo de verdade.
 
+Um peão culpado ainda anda, desde que a casa da frente esteja livre. Se ele chega ao fim, vira bispo. Se herdou a mancha da captura, o lance seguinte de outra peça o limpa pelo repouso. Quem promove nessa hora fica com o único bispo do tabuleiro, e só ele volta a absolver.
+
+## Quando a culpa não sai
+
+Sem bispo, a culpa só sai se um peão virar um. Se não há peão, ou se todo peão está preso numa coluna que ninguém consegue desocupar sem capturar, a mancha é para sempre. Peça culpada não ataca. Quando os dois lados estão assim, não existe sequência de lances que dê mate, e a partida empata na hora.
+
+Um peão com o caminho livre, ou com alguém na frente que pode sair da coluna, mantém o jogo vivo.
+
 ## O que não mudou
 
 Roque, en passant, cravada e xeque seguem as regras de sempre. Um peão culpado não toma en passant: tomar é capturar, e capturar ele não pode mais.
 
 A notação do painel é a brasileira: `R` rei, `D` dama, `T` torre, `B` bispo, `C` cavalo. Um `*` no lance marca que houve absolvição.
 
-A partida acaba por xeque-mate, afogamento, cinquenta lances sem captura nem peão, a mesma posição três vezes, material insuficiente ou desistência.
+A partida acaba por xeque-mate, afogamento, cinquenta lances sem captura nem peão, a mesma posição três vezes, mate impossível ou desistência.
 
 ## Um agente, quando quiser
 

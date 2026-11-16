@@ -356,7 +356,7 @@ describe('fim de partida', () => {
     expect(legalMoves(mate.state)).toHaveLength(0);
   });
 
-  it('dama culpada ao lado do rei não é mate', () => {
+  it('dama culpada ao lado do rei não é mate, e a posição empata', () => {
     const state = loadPosition({
       pieces: [
         { sq: 'c6', type: 'k', color: 'w' },
@@ -366,7 +366,7 @@ describe('fim de partida', () => {
       turn: 'b',
     });
     expect(inCheck(state)).toBe(false);
-    expect(state.result.kind).toBe('playing');
+    expect(state.result).toEqual({ kind: 'draw', reason: 'insufficient' });
   });
 
   it('afogamento quando a culpa impede a única captura', () => {
@@ -437,6 +437,85 @@ describe('fim de partida', () => {
 
     const resigned = resign(createGame(), 'w');
     expect(resigned.result).toEqual({ kind: 'resign', winner: 'b' });
+  });
+});
+
+describe('culpa permanente', () => {
+  it('empata na hora quando ninguém pode voltar a atacar', () => {
+    expect(
+      loadPosition({
+        pieces: [
+          { sq: 'a1', type: 'k', color: 'w' },
+          { sq: 'd4', type: 'q', color: 'w', guilt: true },
+          { sq: 'h8', type: 'k', color: 'b' },
+          { sq: 'd5', type: 'q', color: 'b', guilt: true },
+        ],
+      }).result,
+    ).toEqual({ kind: 'draw', reason: 'insufficient' });
+  });
+
+  it('empata com peões culpados frente a frente, sem bispo', () => {
+    expect(
+      loadPosition({
+        pieces: [
+          { sq: 'e1', type: 'k', color: 'w' },
+          { sq: 'e4', type: 'p', color: 'w', guilt: true },
+          { sq: 'd1', type: 'q', color: 'w', guilt: true },
+          { sq: 'e8', type: 'k', color: 'b' },
+          { sq: 'e5', type: 'p', color: 'b', guilt: true },
+          { sq: 'd8', type: 'q', color: 'b', guilt: true },
+        ],
+      }).result,
+    ).toEqual({ kind: 'draw', reason: 'insufficient' });
+  });
+
+  it('segue se a peça na frente do peão pode sair da coluna', () => {
+    expect(
+      loadPosition({
+        pieces: [
+          { sq: 'b1', type: 'k', color: 'w' },
+          { sq: 'a2', type: 'p', color: 'w', guilt: true },
+          { sq: 'h1', type: 'q', color: 'w', guilt: true },
+          { sq: 'a4', type: 'r', color: 'b', guilt: true },
+          { sq: 'h8', type: 'k', color: 'b' },
+          { sq: 'h7', type: 'q', color: 'b', guilt: true },
+        ],
+      }).result.kind,
+    ).toBe('playing');
+  });
+
+  it('um peão culpado com caminho livre promove e o bispo se limpa no repouso', () => {
+    let state = loadPosition({
+      pieces: [
+        { sq: 'a1', type: 'k', color: 'w' },
+        { sq: 'e7', type: 'p', color: 'w', guilt: true },
+        { sq: 'c1', type: 'q', color: 'w', guilt: true },
+        { sq: 'h8', type: 'k', color: 'b' },
+        { sq: 'a8', type: 'q', color: 'b', guilt: true },
+      ],
+    });
+    expect(state.result.kind).toBe('playing');
+
+    state = playUci(state, 'e7', 'e8').state;
+    expect(at(state, 'e8')).toMatchObject({ type: 'b', guilt: true });
+
+    state = playUci(state, 'a8', 'b8').state;
+    state = playUci(state, 'c1', 'c2').state;
+    expect(at(state, 'e8')).toMatchObject({ type: 'b', guilt: false });
+    expect(state.result.kind).toBe('playing');
+  });
+
+  it('um bispo culpado ainda segura a partida, porque o repouso o limpa', () => {
+    expect(
+      loadPosition({
+        pieces: [
+          { sq: 'a1', type: 'k', color: 'w' },
+          { sq: 'c1', type: 'b', color: 'w', guilt: true },
+          { sq: 'd4', type: 'q', color: 'w', guilt: true },
+          { sq: 'h8', type: 'k', color: 'b' },
+        ],
+      }).result.kind,
+    ).toBe('playing');
   });
 });
 
